@@ -114,6 +114,12 @@ type Prefix struct {
 	Prefix string `json:"prefix"`
 }
 
+type VLAN struct {
+	ID   int    `json:"id"`
+	VID  int    `json:"vid"`
+	Name string `json:"name"`
+}
+
 type listResponse[T any] struct {
 	Count   int `json:"count"`
 	Results []T `json:"results"`
@@ -528,7 +534,8 @@ func (c *Client) FindOrCreateIPAddress(
 // FindOrCreatePrefix ensures that a prefix exists for the given network string
 // (e.g. "192.168.1.0/24"). NetBox automatically places the prefix in the
 // correct position in the hierarchy under any existing less-specific prefix.
-func (c *Client) FindOrCreatePrefix(prefix string) (*Prefix, error) {
+// When vlanID > 0 the prefix is associated with that NetBox VLAN object.
+func (c *Client) FindOrCreatePrefix(prefix string, vlanID int) (*Prefix, error) {
 	body, err := c.get("/api/ipam/prefixes/", url.Values{"prefix": {prefix}})
 	if err != nil {
 		return nil, err
@@ -537,13 +544,26 @@ func (c *Client) FindOrCreatePrefix(prefix string) (*Prefix, error) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
+
+	payload := map[string]any{"prefix": prefix, "status": "active"}
+	if vlanID > 0 {
+		payload["vlan"] = vlanID
+	}
+
 	if result.Count > 0 {
 		p := result.Results[0]
 		c.Log.Debug("found prefix", "prefix", prefix, "id", p.ID)
+		if vlanID > 0 {
+			body, err = c.patch(fmt.Sprintf("/api/ipam/prefixes/%d/", p.ID), payload)
+			if err != nil {
+				c.Log.Warn("could not associate vlan with prefix", "prefix", prefix, "vlan_id", vlanID, "err", err)
+			}
+		}
 		return &p, nil
 	}
+
 	c.Log.Info("creating prefix", "prefix", prefix)
-	body, err = c.post("/api/ipam/prefixes/", map[string]any{"prefix": prefix, "status": "active"})
+	body, err = c.post("/api/ipam/prefixes/", payload)
 	if err != nil {
 		return nil, fmt.Errorf("create prefix %q: %w", prefix, err)
 	}
@@ -552,6 +572,43 @@ func (c *Client) FindOrCreatePrefix(prefix string) (*Prefix, error) {
 	}
 	var p Prefix
 	return &p, json.Unmarshal(body, &p)
+}
+
+// FindOrCreateVLAN returns an existing VLAN by VID scoped to a site, or creates one.
+func (c *Client) FindOrCreateVLAN(siteID, vid int, name string) (*VLAN, error) {
+	q := url.Values{"vid": {fmt.Sprint(vid)}, "site_id": {fmt.Sprint(siteID)}}
+	body, err := c.get("/api/ipam/vlans/", q)
+	if err != nil {
+		return nil, err
+	}
+	var result listResponse[VLAN]
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	if result.Count > 0 {
+		v := result.Results[0]
+		c.Log.Debug("found vlan", "vid", vid, "id", v.ID)
+		return &v, nil
+	}
+	if name == "" {
+		name = fmt.Sprintf("VLAN%d", vid)
+	}
+	c.Log.Info("creating vlan", "vid", vid, "name", name)
+	payload := map[string]any{
+		"vid":    vid,
+		"name":   name,
+		"status": "active",
+		"site":   siteID,
+	}
+	body, err = c.post("/api/ipam/vlans/", payload)
+	if err != nil {
+		return nil, fmt.Errorf("create vlan %d: %w", vid, err)
+	}
+	if c.DryRun {
+		return &VLAN{VID: vid, Name: name}, nil
+	}
+	var v VLAN
+	return &v, json.Unmarshal(body, &v)
 }
 
 // FindDevice looks up a device by hostname. Returns nil, nil if not found.

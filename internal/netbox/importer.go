@@ -95,9 +95,24 @@ func Import(client *Client, device *model.DeviceData, opts ImportOptions) error 
 
 		loopback := isLoopbackInterface(iface.Name)
 
+		// Find or create a NetBox VLAN for VLAN-type interfaces so that any
+		// derived prefixes can be linked back to it.
+		var vlanNetboxID int
+		if iface.VLANid > 0 {
+			vlanName := iface.Description
+			if vlanName == "" {
+				vlanName = fmt.Sprintf("VLAN%d", iface.VLANid)
+			}
+			if v, err := client.FindOrCreateVLAN(site.ID, iface.VLANid, vlanName); err != nil {
+				log.Warn("skipping vlan", "vlan_id", iface.VLANid, "err", err)
+			} else {
+				vlanNetboxID = v.ID
+			}
+		}
+
 		for _, ip := range iface.IPAddresses {
 			if prefix := cidrToPrefix(ip.Address); prefix != "" {
-				if _, err := client.FindOrCreatePrefix(prefix); err != nil {
+				if _, err := client.FindOrCreatePrefix(prefix, vlanNetboxID); err != nil {
 					log.Warn("skipping prefix", "prefix", prefix, "err", err)
 				}
 			}

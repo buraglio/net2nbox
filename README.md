@@ -16,6 +16,8 @@ the extracted data into NetBox via the REST API.
 - Primary IP selection prefers loopback addresses; falls back to first non-link-local
 - Automatic prefix management: each imported IP address is placed in its enclosing
   prefix; prefixes are created if absent and nested automatically by NetBox
+- VLAN import: VLAN-type interfaces create corresponding VLAN objects in NetBox;
+  associated prefixes are linked to those VLANs
 - Dry-run mode: prints planned changes without touching NetBox
 - `parse` sub-command: dumps parsed data as JSON for inspection
 
