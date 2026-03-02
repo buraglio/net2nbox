@@ -109,6 +109,11 @@ type IPAddress struct {
 	} `json:"family"`
 }
 
+type Prefix struct {
+	ID     int    `json:"id"`
+	Prefix string `json:"prefix"`
+}
+
 type listResponse[T any] struct {
 	Count   int `json:"count"`
 	Results []T `json:"results"`
@@ -518,6 +523,35 @@ func (c *Client) FindOrCreateIPAddress(
 	}
 	var ip IPAddress
 	return &ip, json.Unmarshal(body, &ip)
+}
+
+// FindOrCreatePrefix ensures that a prefix exists for the given network string
+// (e.g. "192.168.1.0/24"). NetBox automatically places the prefix in the
+// correct position in the hierarchy under any existing less-specific prefix.
+func (c *Client) FindOrCreatePrefix(prefix string) (*Prefix, error) {
+	body, err := c.get("/api/ipam/prefixes/", url.Values{"prefix": {prefix}})
+	if err != nil {
+		return nil, err
+	}
+	var result listResponse[Prefix]
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	if result.Count > 0 {
+		p := result.Results[0]
+		c.Log.Debug("found prefix", "prefix", prefix, "id", p.ID)
+		return &p, nil
+	}
+	c.Log.Info("creating prefix", "prefix", prefix)
+	body, err = c.post("/api/ipam/prefixes/", map[string]any{"prefix": prefix, "status": "active"})
+	if err != nil {
+		return nil, fmt.Errorf("create prefix %q: %w", prefix, err)
+	}
+	if c.DryRun {
+		return &Prefix{Prefix: prefix}, nil
+	}
+	var p Prefix
+	return &p, json.Unmarshal(body, &p)
 }
 
 // FindDevice looks up a device by hostname. Returns nil, nil if not found.

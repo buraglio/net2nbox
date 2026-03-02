@@ -3,6 +3,7 @@ package netbox
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 
 	"github.com/buraglio/net2nbox/internal/model"
@@ -95,6 +96,12 @@ func Import(client *Client, device *model.DeviceData, opts ImportOptions) error 
 		loopback := isLoopbackInterface(iface.Name)
 
 		for _, ip := range iface.IPAddresses {
+			if prefix := cidrToPrefix(ip.Address); prefix != "" {
+				if _, err := client.FindOrCreatePrefix(prefix); err != nil {
+					log.Warn("skipping prefix", "prefix", prefix, "err", err)
+				}
+			}
+
 			nbIP, err := client.FindOrCreateIPAddress(
 				ip.Address, ip.Description, ip.Family, nbIface.ID,
 			)
@@ -214,4 +221,14 @@ func isLinkLocal(cidr string) bool {
 	addr := strings.SplitN(cidr, "/", 2)[0]
 	return strings.HasPrefix(strings.ToLower(addr), "fe80:") ||
 		strings.HasPrefix(addr, "169.254.")
+}
+
+// cidrToPrefix returns the network address for a host CIDR (e.g. "10.0.0.1/24" → "10.0.0.0/24").
+// Returns "" if the input cannot be parsed.
+func cidrToPrefix(cidr string) string {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return ""
+	}
+	return ipnet.String()
 }

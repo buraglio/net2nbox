@@ -14,6 +14,8 @@ the extracted data into NetBox via the REST API.
 - Auto-detects vendor from config content
 - Idempotent: finds existing NetBox objects before creating new ones
 - Primary IP selection prefers loopback addresses; falls back to first non-link-local
+- Automatic prefix management: each imported IP address is placed in its enclosing
+  prefix; prefixes are created if absent and nested automatically by NetBox
 - Dry-run mode: prints planned changes without touching NetBox
 - `parse` sub-command: dumps parsed data as JSON for inspection
 
