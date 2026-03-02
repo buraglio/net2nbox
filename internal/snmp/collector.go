@@ -39,6 +39,13 @@ const (
 	oidMtxrSerial    = "1.3.6.1.4.1.14988.1.1.7.3.0"
 	oidMtxrBoardName = "1.3.6.1.4.1.14988.1.1.7.8.0"
 	oidMtxrFirmware  = "1.3.6.1.4.1.14988.1.1.7.4.0"
+
+	// LLDP-MIB OIDs (1.3.6.1.2.1.88)
+	oidLLDPLocPortID   = "1.3.6.1.2.1.88.1.3.7.1.3" // lldpLocPortId   — index: localPortNum
+	oidLLDPLocPortDesc = "1.3.6.1.2.1.88.1.3.7.1.4" // lldpLocPortDesc — index: localPortNum
+	oidLLDPRemSysName  = "1.3.6.1.2.1.88.1.4.1.1.9" // lldpRemSysName  — index: timeMark.localPortNum.remIndex
+	oidLLDPRemPortID   = "1.3.6.1.2.1.88.1.4.1.1.7" // lldpRemPortId   — same index
+	oidLLDPRemPortDesc = "1.3.6.1.2.1.88.1.4.1.1.8" // lldpRemPortDesc — same index
 )
 
 // Config holds SNMP connection parameters.
@@ -250,6 +257,77 @@ func (c *Collector) walkTable(tableOID string) (map[string]interface{}, error) {
 		return nil
 	})
 	return result, err
+}
+
+// CollectLLDP walks the LLDP-MIB tables and populates LLDPNeighbors on the
+// matching device interfaces. Existing data is preserved; only new neighbors
+// are appended. Safe to call when LLDP is not supported — walk errors are
+// treated as "no data" and the function returns nil.
+func (c *Collector) CollectLLDP(device *model.DeviceData) error {
+	// Map localPortNum → local interface name from lldpLocPortId table.
+	locPortIDs, err := c.walkTable(oidLLDPLocPortID)
+	if err != nil {
+		return fmt.Errorf("walk lldpLocPortId: %w", err)
+	}
+	locPortDescs, _ := c.walkTable(oidLLDPLocPortDesc)
+
+	portToName := make(map[string]string) // portNum → interface name
+	for idx, val := range locPortIDs {
+		portToName[idx] = snmpString(val)
+	}
+	for idx, val := range locPortDescs {
+		if _, ok := portToName[idx]; !ok {
+			portToName[idx] = snmpString(val)
+		}
+	}
+
+	// Walk remote neighbor tables.
+	// Index format: timeMark.localPortNum.remIndex (always 3 integer components).
+	remSysNames, _ := c.walkTable(oidLLDPRemSysName)
+	remPortIDs, _ := c.walkTable(oidLLDPRemPortID)
+	remPortDescs, _ := c.walkTable(oidLLDPRemPortDesc)
+
+	ifaceByName := make(map[string]*model.InterfaceData)
+	for i := range device.Interfaces {
+		ifaceByName[device.Interfaces[i].Name] = &device.Interfaces[i]
+	}
+
+	for idx, val := range remSysNames {
+		parts := strings.Split(idx, ".")
+		if len(parts) < 3 {
+			continue
+		}
+		localPortNum := parts[len(parts)-2]
+		ifaceName, ok := portToName[localPortNum]
+		if !ok {
+			continue
+		}
+		iface, ok := ifaceByName[ifaceName]
+		if !ok {
+			continue
+		}
+		nbr := model.LLDPNeighbor{RemoteSysName: snmpString(val)}
+		if v, ok := remPortIDs[idx]; ok {
+			nbr.RemotePortID = snmpString(v)
+		}
+		if v, ok := remPortDescs[idx]; ok {
+			nbr.RemotePortDesc = snmpString(v)
+		}
+		iface.LLDPNeighbors = append(iface.LLDPNeighbors, nbr)
+		c.log.Debug("lldp neighbor", "local_iface", ifaceName,
+			"remote_sys", nbr.RemoteSysName, "remote_port", nbr.RemotePortID)
+	}
+	return nil
+}
+
+func snmpString(v interface{}) string {
+	switch val := v.(type) {
+	case []byte:
+		return string(val)
+	case string:
+		return val
+	}
+	return fmt.Sprint(v)
 }
 
 // speedToType maps SNMP ifHighSpeed (Mbps) to a NetBox interface type slug,

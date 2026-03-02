@@ -15,6 +15,9 @@ type ImportOptions struct {
 	Site string
 	// Role is the device role name. Auto-created if absent. Defaults to "Router".
 	Role string
+	// DeviceType overrides the NetBox device-type model string. When empty,
+	// the parsed device.Model is used, falling back to device.Platform.
+	DeviceType string
 	// PrimaryIPFamily selects which address family to promote as the device's
 	// primary IP (4 or 6). 0 means "first non-link-local address found".
 	PrimaryIPFamily int
@@ -37,9 +40,12 @@ func Import(client *Client, device *model.DeviceData, opts ImportOptions) error 
 	}
 
 	// 2. Device type
-	model_ := device.Model
+	model_ := opts.DeviceType
 	if model_ == "" {
-		model_ = device.Platform // fallback: use platform name as model
+		model_ = device.Model
+	}
+	if model_ == "" {
+		model_ = device.Platform
 	}
 	dt, err := client.FindOrCreateDeviceType(mfr.ID, model_)
 	if err != nil {
@@ -70,6 +76,9 @@ func Import(client *Client, device *model.DeviceData, opts ImportOptions) error 
 
 	// 6. Interfaces + IPs
 	var primaryIPv4ID, primaryIPv6ID int
+	var fallbackIPv4ID, fallbackIPv6ID int
+
+	nbIfaces := make(map[string]*Interface) // interface name → NetBox object
 
 	for _, iface := range device.Interfaces {
 		nbIface, err := client.FindOrCreateInterface(
@@ -81,6 +90,9 @@ func Import(client *Client, device *model.DeviceData, opts ImportOptions) error 
 			log.Warn("skipping interface", "name", iface.Name, "err", err)
 			continue
 		}
+		nbIfaces[iface.Name] = nbIface
+
+		loopback := isLoopbackInterface(iface.Name)
 
 		for _, ip := range iface.IPAddresses {
 			nbIP, err := client.FindOrCreateIPAddress(
@@ -91,20 +103,50 @@ func Import(client *Client, device *model.DeviceData, opts ImportOptions) error 
 				continue
 			}
 
-			if primaryIPv4ID == 0 && ip.Family == 4 && !isLinkLocal(ip.Address) {
-				if opts.PrimaryIPFamily == 0 || opts.PrimaryIPFamily == 4 {
+			if ip.Family == 4 && !isLinkLocal(ip.Address) &&
+				(opts.PrimaryIPFamily == 0 || opts.PrimaryIPFamily == 4) {
+				if loopback && primaryIPv4ID == 0 {
 					primaryIPv4ID = nbIP.ID
+				} else if fallbackIPv4ID == 0 {
+					fallbackIPv4ID = nbIP.ID
 				}
 			}
-			if primaryIPv6ID == 0 && ip.Family == 6 && !isLinkLocal(ip.Address) {
-				if opts.PrimaryIPFamily == 0 || opts.PrimaryIPFamily == 6 {
+			if ip.Family == 6 && !isLinkLocal(ip.Address) &&
+				(opts.PrimaryIPFamily == 0 || opts.PrimaryIPFamily == 6) {
+				if loopback && primaryIPv6ID == 0 {
 					primaryIPv6ID = nbIP.ID
+				} else if fallbackIPv6ID == 0 {
+					fallbackIPv6ID = nbIP.ID
 				}
 			}
 		}
 	}
 
-	// 7. Set primary IPs
+	if primaryIPv4ID == 0 {
+		primaryIPv4ID = fallbackIPv4ID
+	}
+	if primaryIPv6ID == 0 {
+		primaryIPv6ID = fallbackIPv6ID
+	}
+
+	// 7. LLDP cables
+	for _, iface := range device.Interfaces {
+		if len(iface.LLDPNeighbors) == 0 {
+			continue
+		}
+		nbIface, ok := nbIfaces[iface.Name]
+		if !ok || nbIface.Cable != nil {
+			continue // interface not created or already cabled
+		}
+		for _, nbr := range iface.LLDPNeighbors {
+			if err := importLLDPCable(client, log, nbIface.ID, nbr); err != nil {
+				log.Warn("skipping lldp cable", "local_iface", iface.Name,
+					"remote_sys", nbr.RemoteSysName, "err", err)
+			}
+		}
+	}
+
+	// 8. Set primary IPs
 	if primaryIPv4ID > 0 && !client.DryRun {
 		if err := client.SetPrimaryIP(dev.ID, primaryIPv4ID, 4); err != nil {
 			log.Warn("could not set primary IPv4", "err", err)
@@ -122,6 +164,49 @@ func Import(client *Client, device *model.DeviceData, opts ImportOptions) error 
 
 	log.Info("import complete", "device", device.Hostname)
 	return nil
+}
+
+// importLLDPCable resolves the remote endpoint from an LLDP neighbor record and
+// creates a cable between the local interface and the remote interface in NetBox.
+func importLLDPCable(client *Client, log *slog.Logger, localIfaceID int, nbr model.LLDPNeighbor) error {
+	remDev, err := client.FindDevice(nbr.RemoteSysName)
+	if err != nil {
+		return err
+	}
+	if remDev == nil {
+		log.Debug("lldp remote device not in NetBox", "sys_name", nbr.RemoteSysName)
+		return nil
+	}
+
+	// Try RemotePortID first, then RemotePortDesc as fallback.
+	var remIface *Interface
+	for _, name := range []string{nbr.RemotePortID, nbr.RemotePortDesc} {
+		if name == "" {
+			continue
+		}
+		remIface, err = client.FindInterface(remDev.ID, name)
+		if err == nil && remIface != nil {
+			break
+		}
+	}
+	if remIface == nil {
+		log.Debug("lldp remote interface not in NetBox",
+			"sys_name", nbr.RemoteSysName, "port_id", nbr.RemotePortID)
+		return nil
+	}
+	if remIface.Cable != nil {
+		log.Debug("lldp remote interface already cabled", "iface_id", remIface.ID)
+		return nil
+	}
+
+	_, err = client.FindOrCreateCable(localIfaceID, remIface.ID)
+	return err
+}
+
+// isLoopbackInterface returns true for loopback interface names.
+func isLoopbackInterface(name string) bool {
+	ln := strings.ToLower(name)
+	return strings.HasPrefix(ln, "loopback") || ln == "lo" || ln == "lo0"
 }
 
 // isLinkLocal returns true for fe80::/10 and 169.254.0.0/16 addresses.

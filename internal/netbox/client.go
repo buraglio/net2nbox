@@ -89,6 +89,13 @@ type Interface struct {
 	Device struct {
 		ID int `json:"id"`
 	} `json:"device"`
+	Cable *struct {
+		ID int `json:"id"`
+	} `json:"cable"`
+}
+
+type Cable struct {
+	ID int `json:"id"`
 }
 
 type IPAddress struct {
@@ -172,23 +179,28 @@ func (c *Client) setHeaders(req *http.Request) {
 
 // FindOrCreateManufacturer returns an existing manufacturer by name or creates one.
 func (c *Client) FindOrCreateManufacturer(name string) (*Manufacturer, error) {
-	q := url.Values{"name": {name}}
-	body, err := c.get("/api/dcim/manufacturers/", q)
-	if err != nil {
-		return nil, err
-	}
-	var result listResponse[Manufacturer]
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	if result.Count > 0 {
-		m := result.Results[0]
-		c.Log.Debug("found manufacturer", "name", name, "id", m.ID)
-		return &m, nil
+	for _, key := range []string{"name", "slug"} {
+		val := name
+		if key == "slug" {
+			val = slugify(name)
+		}
+		body, err := c.get("/api/dcim/manufacturers/", url.Values{key: {val}})
+		if err != nil {
+			return nil, err
+		}
+		var result listResponse[Manufacturer]
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, err
+		}
+		if result.Count > 0 {
+			m := result.Results[0]
+			c.Log.Debug("found manufacturer", "name", name, "id", m.ID)
+			return &m, nil
+		}
 	}
 	c.Log.Info("creating manufacturer", "name", name)
 	payload := map[string]string{"name": name, "slug": slugify(name)}
-	body, err = c.post("/api/dcim/manufacturers/", payload)
+	body, err := c.post("/api/dcim/manufacturers/", payload)
 	if err != nil {
 		return nil, fmt.Errorf("create manufacturer %q: %w", name, err)
 	}
@@ -201,19 +213,25 @@ func (c *Client) FindOrCreateManufacturer(name string) (*Manufacturer, error) {
 
 // FindOrCreateDeviceType returns an existing device type or creates one.
 func (c *Client) FindOrCreateDeviceType(manufacturerID int, model string) (*DeviceType, error) {
-	q := url.Values{"manufacturer_id": {fmt.Sprint(manufacturerID)}, "model": {model}}
-	body, err := c.get("/api/dcim/device-types/", q)
-	if err != nil {
-		return nil, err
-	}
-	var result listResponse[DeviceType]
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	if result.Count > 0 {
-		dt := result.Results[0]
-		c.Log.Debug("found device-type", "model", model, "id", dt.ID)
-		return &dt, nil
+	if manufacturerID > 0 {
+		for _, q := range []url.Values{
+			{"manufacturer_id": {fmt.Sprint(manufacturerID)}, "model": {model}},
+			{"manufacturer_id": {fmt.Sprint(manufacturerID)}, "slug": {slugify(model)}},
+		} {
+			body, err := c.get("/api/dcim/device-types/", q)
+			if err != nil {
+				return nil, err
+			}
+			var result listResponse[DeviceType]
+			if err := json.Unmarshal(body, &result); err != nil {
+				return nil, err
+			}
+			if result.Count > 0 {
+				dt := result.Results[0]
+				c.Log.Debug("found device-type", "model", model, "id", dt.ID)
+				return &dt, nil
+			}
+		}
 	}
 	c.Log.Info("creating device-type", "model", model)
 	payload := map[string]any{
@@ -221,7 +239,7 @@ func (c *Client) FindOrCreateDeviceType(manufacturerID int, model string) (*Devi
 		"model":        model,
 		"slug":         slugify(model),
 	}
-	body, err = c.post("/api/dcim/device-types/", payload)
+	body, err := c.post("/api/dcim/device-types/", payload)
 	if err != nil {
 		return nil, fmt.Errorf("create device-type %q: %w", model, err)
 	}
@@ -234,26 +252,31 @@ func (c *Client) FindOrCreateDeviceType(manufacturerID int, model string) (*Devi
 
 // FindOrCreateDeviceRole returns an existing role by name or creates one.
 func (c *Client) FindOrCreateDeviceRole(name string) (*DeviceRole, error) {
-	q := url.Values{"name": {name}}
-	body, err := c.get("/api/dcim/device-roles/", q)
-	if err != nil {
-		return nil, err
-	}
-	var result listResponse[DeviceRole]
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	if result.Count > 0 {
-		r := result.Results[0]
-		return &r, nil
+	for _, key := range []string{"name", "slug"} {
+		val := name
+		if key == "slug" {
+			val = slugify(name)
+		}
+		body, err := c.get("/api/dcim/device-roles/", url.Values{key: {val}})
+		if err != nil {
+			return nil, err
+		}
+		var result listResponse[DeviceRole]
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, err
+		}
+		if result.Count > 0 {
+			r := result.Results[0]
+			return &r, nil
+		}
 	}
 	c.Log.Info("creating device-role", "name", name)
 	payload := map[string]any{
 		"name":  name,
 		"slug":  slugify(name),
-		"color": "9e9e9e", // neutral grey
+		"color": "9e9e9e",
 	}
-	body, err = c.post("/api/dcim/device-roles/", payload)
+	body, err := c.post("/api/dcim/device-roles/", payload)
 	if err != nil {
 		return nil, fmt.Errorf("create device-role %q: %w", name, err)
 	}
@@ -384,17 +407,19 @@ func (c *Client) FindOrCreateInterface(
 	mtu int,
 	enabled bool,
 ) (*Interface, error) {
-	q := url.Values{
-		"device_id": {fmt.Sprint(deviceID)},
-		"name":      {name},
-	}
-	body, err := c.get("/api/dcim/interfaces/", q)
-	if err != nil {
-		return nil, err
-	}
 	var result listResponse[Interface]
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
+	if deviceID > 0 {
+		q := url.Values{
+			"device_id": {fmt.Sprint(deviceID)},
+			"name":      {name},
+		}
+		body, err := c.get("/api/dcim/interfaces/", q)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, err
+		}
 	}
 
 	payload := map[string]any{
@@ -414,7 +439,7 @@ func (c *Client) FindOrCreateInterface(
 	if result.Count > 0 {
 		iface := result.Results[0]
 		c.Log.Debug("updating interface", "name", name, "id", iface.ID)
-		body, err = c.patch(fmt.Sprintf("/api/dcim/interfaces/%d/", iface.ID), payload)
+		body, err := c.patch(fmt.Sprintf("/api/dcim/interfaces/%d/", iface.ID), payload)
 		if err != nil {
 			return nil, fmt.Errorf("update interface %q: %w", name, err)
 		}
@@ -426,7 +451,7 @@ func (c *Client) FindOrCreateInterface(
 	}
 
 	c.Log.Info("creating interface", "device_id", deviceID, "name", name)
-	body, err = c.post("/api/dcim/interfaces/", payload)
+	body, err := c.post("/api/dcim/interfaces/", payload)
 	if err != nil {
 		return nil, fmt.Errorf("create interface %q: %w", name, err)
 	}
@@ -493,6 +518,72 @@ func (c *Client) FindOrCreateIPAddress(
 	}
 	var ip IPAddress
 	return &ip, json.Unmarshal(body, &ip)
+}
+
+// FindDevice looks up a device by hostname. Returns nil, nil if not found.
+func (c *Client) FindDevice(name string) (*Device, error) {
+	body, err := c.get("/api/dcim/devices/", url.Values{"name": {name}})
+	if err != nil {
+		return nil, err
+	}
+	var result listResponse[Device]
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	if result.Count == 0 {
+		return nil, nil
+	}
+	return &result.Results[0], nil
+}
+
+// FindInterface looks up an interface on a device by name. Returns nil, nil if not found.
+func (c *Client) FindInterface(deviceID int, name string) (*Interface, error) {
+	body, err := c.get("/api/dcim/interfaces/", url.Values{
+		"device_id": {fmt.Sprint(deviceID)},
+		"name":      {name},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result listResponse[Interface]
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	if result.Count == 0 {
+		return nil, nil
+	}
+	return &result.Results[0], nil
+}
+
+// FindOrCreateCable ensures a cable exists between two interface endpoints.
+// If the local interface already has a cable attached it is reused.
+func (c *Client) FindOrCreateCable(aIfaceID, bIfaceID int) (*Cable, error) {
+	body, err := c.get("/api/dcim/cables/", url.Values{"interface_id": {fmt.Sprint(aIfaceID)}})
+	if err == nil {
+		var result listResponse[Cable]
+		if json.Unmarshal(body, &result) == nil && result.Count > 0 {
+			c.Log.Debug("cable already exists", "id", result.Results[0].ID)
+			return &result.Results[0], nil
+		}
+	}
+	c.Log.Info("creating cable", "a_iface_id", aIfaceID, "b_iface_id", bIfaceID)
+	payload := map[string]any{
+		"a_terminations": []map[string]any{
+			{"object_type": "dcim.interface", "object_id": aIfaceID},
+		},
+		"b_terminations": []map[string]any{
+			{"object_type": "dcim.interface", "object_id": bIfaceID},
+		},
+	}
+	body, err = c.post("/api/dcim/cables/", payload)
+	if err != nil {
+		return nil, fmt.Errorf("create cable %d-%d: %w", aIfaceID, bIfaceID, err)
+	}
+	if c.DryRun {
+		return &Cable{}, nil
+	}
+	var cable Cable
+	return &cable, json.Unmarshal(body, &cable)
 }
 
 var reSlugBad = regexp.MustCompile(`[^a-z0-9]+`)

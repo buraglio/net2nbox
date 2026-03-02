@@ -67,6 +67,7 @@ func buildImportCmd() *cobra.Command {
 		netboxToken     string
 		site            string
 		role            string
+		deviceType      string
 		dryRun          bool
 		primaryIPFamily int
 		jsonOutput      bool
@@ -74,6 +75,7 @@ func buildImportCmd() *cobra.Command {
 		snmpHost        string
 		snmpCommunity   string
 		snmpVersion     string
+		snmpLLDP        bool
 	)
 
 	cmd := &cobra.Command{
@@ -96,7 +98,7 @@ func buildImportCmd() *cobra.Command {
 
 			// SNMP augmentation (optional)
 			if snmpHost != "" {
-				device, err = augmentViaSNMP(device, snmpHost, snmpCommunity, snmpVersion)
+				device, err = augmentViaSNMP(device, snmpHost, snmpCommunity, snmpVersion, snmpLLDP)
 				if err != nil {
 					slog.Warn("SNMP augmentation failed; continuing with config data only", "err", err)
 				}
@@ -123,6 +125,7 @@ func buildImportCmd() *cobra.Command {
 			return netbox.Import(client, device, netbox.ImportOptions{
 				Site:            site,
 				Role:            role,
+				DeviceType:      deviceType,
 				PrimaryIPFamily: primaryIPFamily,
 			})
 		},
@@ -135,6 +138,7 @@ func buildImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&netboxToken, "netbox-token", "", "NetBox API token")
 	cmd.Flags().StringVar(&site, "site", "", "NetBox site name or slug (must already exist)")
 	cmd.Flags().StringVar(&role, "role", "Router", "NetBox device role (created if absent)")
+	cmd.Flags().StringVar(&deviceType, "device-type", "", "NetBox device type model string (overrides parsed value)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print planned changes without modifying NetBox")
 	cmd.Flags().IntVar(&primaryIPFamily, "primary-ip", 0,
 		"Address family to promote as primary IP: 4, 6, or 0 (first non-link-local found)")
@@ -143,6 +147,7 @@ func buildImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&snmpHost, "snmp-host", "", "SNMP target host for augmentation")
 	cmd.Flags().StringVar(&snmpCommunity, "snmp-community", "public", "SNMPv2c community string")
 	cmd.Flags().StringVar(&snmpVersion, "snmp-version", "2c", "SNMP version: 1 or 2c")
+	cmd.Flags().BoolVar(&snmpLLDP, "snmp-lldp", false, "Collect LLDP neighbors via SNMP and create cables in NetBox")
 
 	_ = cmd.MarkFlagRequired("file")
 	return cmd
@@ -190,7 +195,7 @@ func buildVendorsCmd() *cobra.Command {
 	}
 }
 
-func augmentViaSNMP(device *model.DeviceData, host, community, version string) (*model.DeviceData, error) {
+func augmentViaSNMP(device *model.DeviceData, host, community, version string, lldp bool) (*model.DeviceData, error) {
 	col := snmp.New(snmp.Config{
 		Target:    host,
 		Community: community,
@@ -203,6 +208,11 @@ func augmentViaSNMP(device *model.DeviceData, host, community, version string) (
 
 	if err := col.Augment(device); err != nil {
 		return device, err
+	}
+	if lldp {
+		if err := col.CollectLLDP(device); err != nil {
+			slog.Warn("LLDP collection failed", "err", err)
+		}
 	}
 	slog.Info("SNMP augmentation complete", "host", host)
 	return device, nil
